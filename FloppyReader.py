@@ -10,7 +10,7 @@ CONTROLLER_COM_PORT = "COM3"
 
 # Image settings
 HEADS = 2
-CYLINDERS = 83
+CYLINDERS = 41
 STARTING_CYL = 0
 TRACKSKIP = 0
 
@@ -36,6 +36,10 @@ man_CBM         = 0x0
 man_PC          = 0x3
 man_Other       = 0x8
 
+# CBM DISK TYPES
+disk_C64        = 0x00
+disk_Amiga      = 0x04
+
 # man_PC
 disk_PC360K     = 0x00
 disk_PC720K     = 0x01
@@ -50,46 +54,43 @@ disk_Rsrvd2     = 0x03
 disk_720        = 0x04
 disk_144M       = 0x05
 
-MANUFACTURE     = man_Other
-DISK_TYPE       = disk_360
+MANUFACTURE     = man_CBM
+DISK_TYPE       = disk_C64
 
 class SCPWriter:
 
-    def __init__(self, imagetype):
-        self.__trackdata = dict()
-        self.__trackduration = np.zeros((HEADS*CYLINDERS, REVOLUTIONS))
-        self.__tracklen = np.zeros((HEADS*CYLINDERS, REVOLUTIONS))
-        self.__imagetype = imagetype
+    def __init__(self):
+        self.data = dict()
+        self.trackduration = np.zeros((HEADS*CYLINDERS, REVOLUTIONS))
+        self.tracklen = np.zeros((HEADS*CYLINDERS, REVOLUTIONS))
 
     def fileheader(self):
         # SCP header
-        scp_magic = b"SCP"
-        scp_vers = 0x22 # version 2.2
-        scp_type = self.__imagetype
-        scp_nrev = REVOLUTIONS # number of revolutions
-        scp_starttrack = 0 # always start at track 0  not at min(self.trackdata.keys())
-        scp_endtrack = max(self.__trackdata.keys())
-        scp_flags = 1+CONFIG_FLAGS # flux data starts at index
-        scp_width = 0 # 16 bits
-        scp_heads = [-1, TRACKSKIP+1, 0][HEADS]
-        scp_res = (40e6/SAMPLE_RATE) - 1
-        scp_checksum = 0 # TODO
-
+        scp_magic       = b"SCP"
+        scp_vers        = 0x22                      # version 2.2
+        scp_type        = (MANUFACTURE<<4) + DISK_TYPE
+        scp_nrev        = REVOLUTIONS               # number of revolutions
+        scp_starttrack  = 0                         # always start at track 0  not at min(self.data.keys())
+        scp_endtrack    = max(self.data.keys())
+        scp_flags       = 1+CONFIG_FLAGS            # flux data starts at index
+        scp_width       = 0                         # 16 bits
+        scp_heads       = [-1, TRACKSKIP+1, 0][HEADS]
+        scp_res         = (40e6/SAMPLE_RATE) - 1
+        scp_checksum    = 0                         # TODO
         scp_header = pack("<3sBBBBBBBBBL", scp_magic, scp_vers, scp_type, scp_nrev, scp_starttrack, scp_endtrack, scp_flags, scp_width, scp_heads, scp_res, scp_checksum)
-        return scp_header
 
-    def trackoffsettable(self):
         # SCP track table
         scp_tracklist = HEADS*CYLINDERS*[0]
-        offs = len(self.fileheader()) + HEADS*CYLINDERS*4 # 1 long word for each track
-        for k in range(len(scp_tracklist)):
+        offs = len(scp_header) + TRACKS*4                                       # 1 long word for each track
+        for k in range(TRACKS):
             try:
-                scp_tlen = len(self.trackdata(k)) + len(self.trackheader(k)) # will raise KeyError if track does not exist
-                scp_tracklist[k] = offs
-                offs = offs + scp_tlen 
+                scp_tlen = len(self.trackdata(k)) + len(self.trackheader(k))    # will raise KeyError if track does not exist
+                scp_header += pack("<L", offs)
+                offs += scp_tlen
             except:
-                scp_tracklist[k] = 0  # skip track
-        scp_trackoffsets = pack("<%dL" % len(scp_tracklist), *scp_tracklist)
+                print("can't find track {} head {}".format(k/2, k%2))
+                scp_header += pack("<L", 0)                                     # skip track
+                
         return scp_trackoffsets
 
     def trackheader(self, num): # will raise KeyError if track does not exist
@@ -99,15 +100,15 @@ class SCPWriter:
         scp_trkhead = pack("<3sB", scp_tmagic, scp_trackno)
         scp_tstart = 4 + 12*REVOLUTIONS # first revolution starts after this header
         for k in range(REVOLUTIONS):
-            scp_tduration = round(self.__trackduration[num,k]*SAMPLE_RATE) 
-            scp_tlen = self.__tracklen[num,k] # in bitcells, not in bytes!
+            scp_tduration = round(self.trackduration[num,k]*SAMPLE_RATE) 
+            scp_tlen = self.tracklen[num,k] # in bitcells, not in bytes!
             scp_trkhead = scp_trkhead + pack("<LLL", int(scp_tduration), int(scp_tlen), scp_tstart)
             scp_tstart = scp_tstart + 2 * int(scp_tlen)  # start of next revolution
         return scp_trkhead
 
     def trackdata(self, num): # will raise KeyError if track does not exist
         # round to sample-rate precision
-        bitcells = np.round(self.__trackdata[num]*SAMPLE_RATE)
+        bitcells = np.round(self.data[num]*SAMPLE_RATE)
         # pack into output data
         bitdata = pack(">%dH" % len(bitcells), *bitcells.astype('int'))
         return bitdata
@@ -127,28 +128,27 @@ class SCPWriter:
         for k in range(REVOLUTIONS):
             # one revolution
             tr_rev = tr[indexpulse[k]:indexpulse[k+1]+1] # one sample overlap
-            self.__trackduration[num,k] = max(tr_rev.times) - min(tr_rev.times)
-            self.__tracklen[num,k] = np.count_nonzero(np.diff(tr_rev.read_data) == -1) # count bitcells, aka transitions from high->low
+            self.trackduration[num,k] = max(tr_rev.times) - min(tr_rev.times)
+            self.tracklen[num,k] = np.count_nonzero(np.diff(tr_rev.read_data) == -1) # count bitcells, aka transitions from high->low
 
         # shorten first revolution by 1 bitcell to keep Aufit happy
-        self.__tracklen[num,0] = self.__tracklen[num,0]-1
+        self.tracklen[num,0] = self.tracklen[num,0]-1
         # now extract all data between first and last index pulses
         trkstart = indexpulse[0]
         trkstop = indexpulse[-1]
         tr = tr[trkstart:trkstop+1]
         fluxchg = np.where(np.diff(tr.read_data) == -1)[0] # transitions from high->low
         fluxchg = fluxchg+1 # +1 so we get the indices where read_data is low
-        self.__trackdata[num] = np.diff(tr.times[fluxchg])
+        self.data[num] = np.diff(tr.times[fluxchg])
 
 
     def saveimage(self, filename):
         with open(filename, "wb") as f:
             f.write(self.fileheader())
-            f.write(self.trackoffsettable())
-            for k in range(max(self.__trackdata.keys())+1):
+            for k in range(max(self.data.keys())+1):
                 try:
                     f.write(self.trackheader(k))
-                    f.write(self.trackdata(k))
+                    f.write(self.data(k))
                 except:
                     pass
             f.write(time.asctime().encode("latin1"))
@@ -209,7 +209,7 @@ class FloppyDrive:
 
 
 
-s = SCPWriter((MANUFACTURE<<4) + DISK_TYPE)
+s = SCPWriter()
 l = LogicAnalyzer()
 l.setup()
 f = FloppyDrive(CONTROLLER_COM_PORT)
