@@ -6,6 +6,8 @@ import numpy as np
 import saleae
 import serial
 
+CONTROLLER_COM_PORT = "COM3"
+
 # Image settings
 HEADS = 2
 CYLINDERS = 83
@@ -170,55 +172,47 @@ class LogicAnalyzer:
             time.sleep(.25)
 
 class FloppyDrive:
-    # connections between serial cable and floppy:
-    # RTS = direction select = green, pin 18
-    # DTR = side select = grey, 32
-    # TX = step = orange, 20
-    # CTS = track 0 = brown, 26
-    # GND = GND = black, odd pin
+    # For controlling the floppy-drive automation controller
     def __init__(self, portname):
-        self.p = serial.Serial(port=portname, baudrate=115200)
-        self.track = 0
+        self.s = serial.Serial(port=portname, baudrate=115200)
+        time.sleep(3)
+        self.start()
         self.rezero()
         self.sideselect(0)
 
+    def _write(self, txt):
+        self.s.write(txt.encode())
+        self.s.write(0xD)
+        self.s.write(0xA)
+        while self.s.readline() != b'OK\r\n':
+            pass
+
+    def start(self):
+        self._write('start')
+        time.sleep(3)
+
+    def stop(self):
+        self._write('stop')
+
     def rezero(self):
-        while (not self.p.cts): # track 0 sensor
-            self.step("out", settle=False)
-        self.track = 0
+        self._write('step 0')
 
     # dirstr = "in" (i.e. towards track 79) or "out" (i.e. towards track 0)
-    def step(self, dirstr, settle=True):
-        if dirstr == "out":
-            direction = False
-        else:
-            direction = True
-        self.p.rts = direction
-        time.sleep(1e-6) # setup time for direction signal
-        # will output one low pulse for the start bit, duration 1/115200 = 8.7µs
-        self.p.write(b"\xff")
-        self.p.flush()
-        if settle:
-            time.sleep(20e-3) # head settling time
-        else:
-            time.sleep(3e-3) # minimum step rate
-        if direction:
-            if self.track > 0:
-                self.track = self.track - 1
-        else:
-            self.track = self.track + 1
+    def step(self, dirstr):
+        if dirstr == "in":
+            self._write('step +')
+        elif dirstr == "out":
+            self._write('step -')
 
     def sideselect(self, side):
-        if side == 1:
-            self.p.dtr = True
-        else:
-            self.p.dtr = False
+        self._write('head %d' % side)
+
+
 
 s = SCPWriter((MANUFACTURE<<4) + DISK_TYPE)
 l = LogicAnalyzer()
 l.setup()
-f = FloppyDrive("com3")
-f.rezero()
+f = FloppyDrive(CONTROLLER_COM_PORT)
 
 with tempfile.TemporaryDirectory() as tmpdirname:
     fname = os.path.join(tmpdirname,"export.bin")
@@ -233,5 +227,7 @@ with tempfile.TemporaryDirectory() as tmpdirname:
         f.step("in")
         for _ in range(TRACKSKIP):
             f.step("in")
+f.rezero()
+f.stop()
 
 s.saveimage(OUTPUT_IMAGE_FILE)
