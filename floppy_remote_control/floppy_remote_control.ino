@@ -6,7 +6,7 @@
 #define TRK0_PIN 13
 
 void setup() {
-  pinMode(TRK0_PIN, INPUT);
+  pinMode(TRK0_PIN, INPUT_PULLUP);
   Serial.begin(115200);
   pinMode(DIR_PIN, OUTPUT);
   digitalWrite(DIR_PIN, HIGH);
@@ -17,7 +17,7 @@ void setup() {
   pinMode(MOTOR_PIN, OUTPUT);
   digitalWrite(MOTOR_PIN, HIGH);
   pinMode(DS_PIN, OUTPUT);
-  digitalWrite(DS_PIN, LOW);
+  digitalWrite(DS_PIN, HIGH);
 }
 
 void _step(){
@@ -59,8 +59,8 @@ void loop() {
     if (arg == "0") digitalWrite(HEAD_PIN, HIGH);
     else if (arg == "1") digitalWrite(HEAD_PIN, LOW);
   }
-  else if(command == "start") digitalWrite(MOTOR_PIN, LOW);
-  else if(command == "stop") digitalWrite(MOTOR_PIN, HIGH);
+  else if(command == "start") {digitalWrite(MOTOR_PIN, LOW); digitalWrite(DS_PIN, LOW);}
+  else if(command == "stop") {digitalWrite(MOTOR_PIN, HIGH); digitalWrite(DS_PIN, HIGH);}
   if(command.length() > 0)
   {
     Serial.print(command);

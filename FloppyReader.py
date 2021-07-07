@@ -10,7 +10,7 @@ CONTROLLER_COM_PORT = "COM3"
 
 # Image settings
 HEADS = 2
-CYLINDERS = 41
+CYLINDERS = 78
 STARTING_CYL = 0
 TRACKSKIP = 0
 
@@ -22,7 +22,7 @@ flag_96tpi          = 0x02
 flag_300rpm         = 0x00
 flag_360rpm         = 0x04
 
-CONFIG_FLAGS = flag_48tpi + flag_300rpm
+CONFIG_FLAGS = flag_48tpi + flag_360rpm
 
 # Settings related to the analyzer setup
 ANALYZER_PRESET_FILE    = "setup8m.logicsettings"   # Name of preset-file
@@ -54,15 +54,15 @@ disk_Rsrvd2     = 0x03
 disk_720        = 0x04
 disk_144M       = 0x05
 
-MANUFACTURE     = man_CBM
-DISK_TYPE       = disk_C64
+MANUFACTURE     = man_Other
+DISK_TYPE       = disk_12M
 
 class SCPWriter:
 
     def __init__(self):
         self.data = dict()
-        self.trackduration = np.zeros((HEADS*CYLINDERS, REVOLUTIONS))
-        self.tracklen = np.zeros((HEADS*CYLINDERS, REVOLUTIONS))
+        self.trackduration = np.zeros((HEADS*(STARTING_CYL+CYLINDERS), REVOLUTIONS))
+        self.tracklen = np.zeros((HEADS*(STARTING_CYL+CYLINDERS), REVOLUTIONS))
 
     def fileheader(self):
         # SCP header
@@ -74,24 +74,26 @@ class SCPWriter:
         scp_endtrack    = max(self.data.keys())
         scp_flags       = 1+CONFIG_FLAGS            # flux data starts at index
         scp_width       = 0                         # 16 bits
-        scp_heads       = [-1, TRACKSKIP+1, 0][HEADS]
-        scp_res         = (40e6/SAMPLE_RATE) - 1
+        scp_heads       = [-1, 1, 0][HEADS]
+        scp_res         = int(40e6/SAMPLE_RATE) - 1
         scp_checksum    = 0                         # TODO
         scp_header = pack("<3sBBBBBBBBBL", scp_magic, scp_vers, scp_type, scp_nrev, scp_starttrack, scp_endtrack, scp_flags, scp_width, scp_heads, scp_res, scp_checksum)
 
         # SCP track table
-        scp_tracklist = HEADS*CYLINDERS*[0]
-        offs = len(scp_header) + TRACKS*4                                       # 1 long word for each track
-        for k in range(TRACKS):
+        offs = len(scp_header) + (STARTING_CYL+CYLINDERS)*8                     # 2 long word for each cylinder
+        for k in range(HEADS*(STARTING_CYL+CYLINDERS)):
             try:
+                print("saving track {} head {}".format(int(k/HEADS), k%HEADS))
                 scp_tlen = len(self.trackdata(k)) + len(self.trackheader(k))    # will raise KeyError if track does not exist
                 scp_header += pack("<L", offs)
                 offs += scp_tlen
             except:
-                print("can't find track {} head {}".format(k/2, k%2))
+                print("can't find track!")
                 scp_header += pack("<L", 0)                                     # skip track
-                
-        return scp_trackoffsets
+            if HEADS == 1:
+                scp_header += pack("<L", 0) 
+
+        return scp_header
 
     def trackheader(self, num): # will raise KeyError if track does not exist
         # SCP track header
@@ -147,8 +149,9 @@ class SCPWriter:
             f.write(self.fileheader())
             for k in range(max(self.data.keys())+1):
                 try:
+                    t_dat = self.trackdata(k)
                     f.write(self.trackheader(k))
-                    f.write(self.data(k))
+                    f.write(t_dat)
                 except:
                     pass
             f.write(time.asctime().encode("latin1"))
@@ -177,6 +180,7 @@ class FloppyDrive:
         self.s = serial.Serial(port=portname, baudrate=115200)
         time.sleep(3)
         self.start()
+        time.sleep(3)
         self.rezero()
         self.sideselect(0)
 
@@ -195,13 +199,16 @@ class FloppyDrive:
         self._write('stop')
 
     def rezero(self):
+        print("stepping home")
         self._write('step 0')
 
     # dirstr = "in" (i.e. towards track 79) or "out" (i.e. towards track 0)
     def step(self, dirstr):
         if dirstr == "in":
+            print("stepping +")
             self._write('step +')
         elif dirstr == "out":
+            print("stepping -")
             self._write('step -')
 
     def sideselect(self, side):
@@ -218,15 +225,18 @@ with tempfile.TemporaryDirectory() as tmpdirname:
     fname = os.path.join(tmpdirname,"export.bin")
     for _ in range(STARTING_CYL):
         f.step("in")
-    for trackno in range(CYLINDERS-STARTING_CYL):
+    for trackno in range(STARTING_CYL, STARTING_CYL+CYLINDERS):
         for headno in range(HEADS):
             print("T%dS%d" % (trackno, headno))
             f.sideselect(headno)
             l.captureandsave(fname)
             s.loadtrack(HEADS*trackno + headno, fname)
+        f.sideselect(0)
+        time.sleep(0.2)
         f.step("in")
         for _ in range(TRACKSKIP):
             f.step("in")
+time.sleep(2)
 f.rezero()
 f.stop()
 
