@@ -6,13 +6,17 @@ import numpy as np
 import saleae
 import serial
 
-CONTROLLER_COM_PORT = "COM3"
+CONTROLLER_COM_PORT = "COM4"
+CHANNEL_INDEX = 1
+CHANNEL_DATA = 3
 
 # Image settings
 HEADS = 2
-CYLINDERS = 78
+CYLINDERS = 83
 STARTING_CYL = 0
 TRACKSKIP = 0
+FLUX_OFFSET = 50
+OVERLAP = 1
 
 OUTPUT_IMAGE_FILE = "floppy2.scp"
 
@@ -22,7 +26,7 @@ flag_96tpi          = 0x02
 flag_300rpm         = 0x00
 flag_360rpm         = 0x04
 
-CONFIG_FLAGS = flag_48tpi + flag_360rpm
+CONFIG_FLAGS = flag_96tpi + flag_360rpm
 
 # Settings related to the analyzer setup
 ANALYZER_PRESET_FILE    = "setup8m.logicsettings"   # Name of preset-file
@@ -54,8 +58,8 @@ disk_Rsrvd2     = 0x03
 disk_720        = 0x04
 disk_144M       = 0x05
 
-MANUFACTURE     = man_Other
-DISK_TYPE       = disk_12M
+MANUFACTURE     = man_PC
+DISK_TYPE       = disk_PC12M
 
 class SCPWriter:
 
@@ -117,31 +121,33 @@ class SCPWriter:
 
     def loadtrack(self, num, filename):
         # load and process one track
-        # tr = np.recfromcsv(filename)
+        # trackdata = np.recfromcsv(filename)
         
         # faster binary file parser: assumes index in channel 1, read_data in channel 3
-        temp = iter_unpack("=qQ", open(filename,"rb").read())
-        tr = np.rec.array([(k[0]/SAMPLE_RATE,(k[1]&2) >> 1,(k[1]&8) >> 3) for k in temp], dtype=[('times','f8'),('index','i4'),('read_data','i4')])
+        file = iter_unpack("=qQ", open(filename,"rb").read())
+        trackdata = np.rec.array([(point[0]/SAMPLE_RATE, (point[1] >> CHANNEL_INDEX) & 1, (point[1] >> CHANNEL_DATA) & 1) for point in file],
+                                 dtype = [('times','f8'), ('index','i4'), ('read_data','i4')])
 
-        indexpulse = np.where(np.diff(tr.index) == -1)[0]+1 # index transitions from high->low
+        indexpulse = np.where(np.diff(trackdata.index) == -1)[0]+1 # index transitions from high->low
         if len(indexpulse) != REVOLUTIONS+1:
             print("Not enough index pulses found")
 
-        for k in range(REVOLUTIONS):
+        for revolution in range(REVOLUTIONS):
             # one revolution
-            tr_rev = tr[indexpulse[k]:indexpulse[k+1]+1] # one sample overlap
-            self.trackduration[num,k] = max(tr_rev.times) - min(tr_rev.times)
-            self.tracklen[num,k] = np.count_nonzero(np.diff(tr_rev.read_data) == -1) # count bitcells, aka transitions from high->low
+            trackdata_rev = trackdata[indexpulse[revolution]:indexpulse[revolution+1]+OVERLAP] # one sample overlap
+            self.trackduration[num,revolution] = max(trackdata_rev.times) - min(trackdata_rev.times)
+            self.tracklen[num,revolution] = np.count_nonzero(np.diff(trackdata_rev.read_data) == -1) # count bitcells, aka transitions from high->low
 
         # shorten first revolution by 1 bitcell to keep Aufit happy
-        self.tracklen[num,0] = self.tracklen[num,0]-1
+        for revolution in range(REVOLUTIONS-1):
+            self.tracklen[num,revolution] = self.tracklen[num,revolution]-OVERLAP
+
         # now extract all data between first and last index pulses
-        trkstart = indexpulse[0]
-        trkstop = indexpulse[-1]
-        tr = tr[trkstart:trkstop+1]
-        fluxchg = np.where(np.diff(tr.read_data) == -1)[0] # transitions from high->low
-        fluxchg = fluxchg+1 # +1 so we get the indices where read_data is low
-        self.data[num] = np.diff(tr.times[fluxchg])
+        trkstart = indexpulse[0]+FLUX_OFFSET
+        trkstop = indexpulse[-1]+FLUX_OFFSET
+        trackdata = trackdata[trkstart:trkstop+1]
+        fluxchg = np.where(np.diff(trackdata.read_data) == -1)[0]+1 # transitions from high->low
+        self.data[num] = np.diff(trackdata.times[fluxchg])
 
 
     def saveimage(self, filename):
@@ -165,14 +171,19 @@ class LogicAnalyzer:
         # therefore load "canned" settings from file
         self.s.load_from_file(os.path.join(os.getcwd(),ANALYZER_PRESET_FILE))
 
+    def wait_for_analyzer(self):
+        starttime = time.time()
+        while not self.s.is_processing_complete():
+            time.sleep(.1)
+            if time.time() > starttime + 5:
+                raise Exception("Timeout!")
+
     def captureandsave(self, filename):
         self.s.close_all_tabs()
-        self.s.capture_start_and_wait_until_finished()
-        # faster binary export
-        #self.s.export_data2(filename, format="csv", display_base="separate")
+        self.s.capture_start()
+        self.wait_for_analyzer()
         self.s.export_data2(filename, format="binary", each_sample=False, word_size=64)
-        while (not self.s.is_processing_complete()):
-            time.sleep(.25)
+        self.wait_for_analyzer()
 
 class FloppyDrive:
     # For controlling the floppy-drive automation controller
@@ -229,8 +240,13 @@ with tempfile.TemporaryDirectory() as tmpdirname:
         for headno in range(HEADS):
             print("T%dS%d" % (trackno, headno))
             f.sideselect(headno)
-            l.captureandsave(fname)
-            s.loadtrack(HEADS*trackno + headno, fname)
+            while True:
+                try:
+                    l.captureandsave(fname)
+                    s.loadtrack(HEADS*trackno + headno, fname)
+                    break
+                except Exception as e:
+                    continue
         f.sideselect(0)
         time.sleep(0.2)
         f.step("in")

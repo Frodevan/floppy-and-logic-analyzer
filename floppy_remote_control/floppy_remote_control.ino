@@ -1,7 +1,7 @@
-#define DIR_PIN 2
-#define STEP_PIN 3
-#define MOTOR_PIN 4
-#define DS_PIN 5
+#define DIR_PIN 4
+#define STEP_PIN 5
+#define MOTOR_PIN 2
+#define DS_PIN 3
 #define HEAD_PIN 6
 #define TRK0_PIN 13
 
